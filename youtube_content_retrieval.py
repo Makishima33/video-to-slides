@@ -1,9 +1,12 @@
+from flask import Flask, jsonify, request, send_file
+from flask_cors import CORS
 import os
-import json
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 import httpx
 
+app = Flask(__name__)
+CORS(app)
 # Set up the YouTube API client
 api_key = os.getenv('YOUTUBE_API_KEY')
 if not api_key:
@@ -11,7 +14,6 @@ if not api_key:
 
 youtube = build('youtube', 'v3', developerKey=api_key)
 
-# Function to retrieve video metadata
 # Function to retrieve video metadata
 def get_video_metadata(video_id):
     try:
@@ -108,12 +110,21 @@ def parse_subtopics(subtopic_text):
     subtopics = {}
 
     for section in sections:
-        if "Subtopic" in section:
-            title_line, text_line = section.split("\n  Text: ")
-            title = title_line.replace("Subtopic", "").strip(": ")
-            subtopics[title] = text_line.strip()
+        try:
+            if "Subtopic" in section:
+                title_line, text_line = section.split("\n  Text: ")
+                
+                title = title_line.replace("Subtopic", "").strip(": ").lstrip("- ").strip()
+                
+                # Store the cleaned title and the corresponding text
+                subtopics[title] = text_line.strip()
+        except ValueError as e:
+            # Log the error and the section causing it
+            print(f"Error processing section: {section} - {str(e)}")
+            continue
     
     return subtopics
+
 
 # Step 3: Summarize the content for each subtopic using GPT-4o
 def summarize_content_with_azure_openai(transcript_section):
@@ -186,11 +197,6 @@ def parse_gpt_output(output_text):
     head = lines[0].replace("Head:", "").strip()
     title = lines[1].replace("Title:", "").strip()
     subtopic = lines[2].replace("Subtopic:", "").strip()
-    
-    # Remove any leading hyphen and extra spaces in subtopic
-    # subtopic = subtopic.lstrip("-").strip().replace("-", "")
-    
-    # Extract content bullet points without the leading '-'
     content = [line.strip().replace("-", "", 1).strip() for line in lines[4:] if line.startswith("-")]
 
     return head, title, subtopic, content
@@ -222,7 +228,6 @@ def create_cover_page(title, thumbnail_url, user_name="Created using ChatSlide")
     
     return cover_slide
 
-# Create slide objects for each subtopic
 def create_slide_objects_for_subtopics(metadata, subtopics):
     slides = {}
     cover_slide = create_cover_page(metadata['title'], metadata['thumbnail_url'])
@@ -231,11 +236,11 @@ def create_slide_objects_for_subtopics(metadata, subtopics):
         transcript_summary = summarize_content_with_azure_openai(text)
         
         if transcript_summary:
-            head, title_text, subtopics, content = parse_gpt_output(transcript_summary)
-            slide = {
+            head, title_text, subtopic, content = parse_gpt_output(transcript_summary)
+            slides[i] = {
                 "head": head,
                 "title": title_text,
-                "subtopic": subtopics,
+                "subtopic": subtopic,
                 "userName": "Created using ChatSlide",
                 "template": "Creative_Brief_011",
                 "content": content,
@@ -255,32 +260,53 @@ def create_slide_objects_for_subtopics(metadata, subtopics):
                 "subtitleFontFamily": "",
                 "contentFontFamily": ""
             }
-            slides[f"{i}"] = slide
 
     return slides
 
-# Main function to retrieve video content and generate the slides
-def main():
-    video_id = 'ML-Rg0XIikA'
+@app.route('/api/generate-slides/<video_id>', methods=['POST'])
+def generate_slides(video_id):
+    try:
+        if not isinstance(video_id, str):
+            return jsonify({'error': 'Invalid video ID'}), 400
+        
+        print(f"Video ID received: {video_id}")
+        
+        # Process the video and generate slides
+        metadata = get_video_metadata(video_id)
+        if not metadata:
+            print("Error retrieving metadata")
+            return jsonify({'error': 'Unable to retrieve video metadata'}), 400
+        
+        
+        transcript = get_video_transcript(video_id)
+        if not transcript:
+            print("Error retrieving transcript")
+            return jsonify({'error': 'Unable to retrieve video transcript'}), 400
+        
+        
+        if metadata and transcript:
+            
+            # Identify subtopics using Azure OpenAI
+            subtopic_text = identify_subtopics_with_azure_openai(transcript)
+            if not subtopic_text:
+                print("Error identifying subtopics")
+                return jsonify({'error': 'Unable to retrieve subtopics from transcript'}), 400
+            
+            
+            subtopics = parse_subtopics(subtopic_text)
+            
+            
+            slides = create_slide_objects_for_subtopics(metadata, subtopics)
+            first_slide = slides[0]
+            print(f"First slide: {first_slide}")
 
-    # Step 1: Retrieve video metadata
-    metadata = get_video_metadata(video_id)
+            return jsonify(slides), 200     
+        else:
+            return jsonify({'error': 'Unable to retrieve metadata or transcript'}), 400
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-    # Step 2: Retrieve video transcript
-    transcript = get_video_transcript(video_id)
-
-    # Step 3: Identify subtopics using GPT-4o
-    if metadata and transcript:
-        subtopic_text = identify_subtopics_with_azure_openai(transcript)
-        subtopics = parse_subtopics(subtopic_text)
-
-        # Step 4: Generate slide objects for each subtopic
-        slides = create_slide_objects_for_subtopics(metadata, subtopics)
-
-        # Step 5: Save the slides to a JSON file
-        with open('slides_by_subtopic.json', 'w', encoding='utf-8') as f:
-            json.dump(slides, f, ensure_ascii=False, indent=2)
-        print("\nSlides saved to 'slides_by_subtopic.json'")
 
 if __name__ == '__main__':
-    main()
+    app.run(debug=True)
