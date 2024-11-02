@@ -51,6 +51,53 @@ def get_video_transcript(video_id):
     except Exception as e:
         print(f"Error retrieving transcript: {e}")
         return None
+# Function to generate a summary using Azure OpenAI
+def generate_summary(transcript):
+    try:
+        AZURE_OPENAI_KEY_USEAST = os.getenv("AZURE_OPENAI_KEY_USEAST")
+        ENDPOINT_USEAST = os.getenv("ENDPOINT_USEAST")
+        if not AZURE_OPENAI_KEY_USEAST or not ENDPOINT_USEAST:
+            raise ValueError("Azure OpenAI credentials are missing.")
+
+        endpoint = ENDPOINT_USEAST
+        deployment_id = "gpt-4o"
+        api_key = AZURE_OPENAI_KEY_USEAST
+
+        url = f"{endpoint}/openai/deployments/{deployment_id}/chat/completions?api-version=2024-09-01-preview"
+
+        # Prompt to generate a concise summary of the transcript
+        prompt = f"""
+        Create a concise and informative summary for the following video transcript:
+
+        Transcript: {transcript}
+
+        The summary should highlight the main points discussed in the video, keeping it brief and informative.
+        """
+
+        data = {
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 300,
+            "temperature": 0.5
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": api_key
+        }
+
+        response = httpx.post(url, json=data, headers=headers, timeout=120)
+        response.raise_for_status()
+
+        result = response.json()
+        summary = result['choices'][0]['message']['content'].strip()
+        return summary
+
+    except Exception as e:
+        print(f"Error generating summary with Azure OpenAI: {e}")
+        return "Error generating summary."
 
 # Function to split transcript into subtopics using Azure OpenAI GPT-4o
 def identify_subtopics_with_azure_openai(transcript):
@@ -262,6 +309,54 @@ def create_slide_objects_for_subtopics(metadata, subtopics):
             }
 
     return slides
+# Function to generate a short comment using Azure OpenAI
+def generate_short_comment_with_azure(video_title, video_summary):
+    try:
+        AZURE_OPENAI_KEY_USEAST = os.getenv("AZURE_OPENAI_KEY_USEAST")
+        ENDPOINT_USEAST = os.getenv("ENDPOINT_USEAST")
+        if not AZURE_OPENAI_KEY_USEAST or not ENDPOINT_USEAST:
+            raise ValueError("Azure OpenAI credentials are missing.")
+
+        endpoint = ENDPOINT_USEAST
+        deployment_id = "gpt-4o"
+        api_key = AZURE_OPENAI_KEY_USEAST
+
+        url = f"{endpoint}/openai/deployments/{deployment_id}/chat/completions?api-version=2024-09-01-preview"
+
+        prompt = f"""
+        Create a two-sentence comment based on what was learned from this video and how ChatSlide was used to make slides:
+        
+        Video Title: {video_title}
+        Video Summary: {video_summary}
+        
+        Format:
+        "I'm glad to share that I have learned [key insights] from this video and I made slides using ChatSlide: <link to the slides> to help me [purpose]."
+        """
+
+        data = {
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 150,
+            "temperature": 0.7
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": api_key
+        }
+
+        response = httpx.post(url, json=data, headers=headers, timeout=120)
+        response.raise_for_status()
+
+        result = response.json()
+        comment = result['choices'][0]['message']['content'].strip()
+        return comment
+
+    except Exception as e:
+        print(f"Error generating comment with Azure OpenAI: {e}")
+        return "Error generating comment."
 
 @app.route('/api/generate-slides/<video_id>', methods=['POST'])
 def generate_slides(video_id):
@@ -298,13 +393,33 @@ def generate_slides(video_id):
             
             slides = create_slide_objects_for_subtopics(metadata, subtopics)
             first_slide = slides[0]
-            print(f"First slide: {first_slide}")
 
             return jsonify(slides), 200     
         else:
             return jsonify({'error': 'Unable to retrieve metadata or transcript'}), 400
     except Exception as e:
         print(f"Error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/generate-comment/<video_id>', methods=['POST'])
+def generate_comment(video_id):
+    try:
+        metadata = get_video_metadata(video_id)
+        if not metadata:
+            return jsonify({'error': 'Unable to retrieve video metadata'}), 400
+        
+        transcript = get_video_transcript(video_id)
+        if not transcript:
+            return jsonify({'error': 'Unable to retrieve video transcript'}), 400
+
+        video_title = metadata['title']
+        video_summary = generate_summary(transcript)
+        
+        comment = generate_short_comment_with_azure(video_title, video_summary)
+        
+        return jsonify({'comment': comment}), 200
+    except Exception as e:
+        print(f"Error generating comment: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 
